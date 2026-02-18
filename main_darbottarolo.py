@@ -14,6 +14,8 @@ from playwright.async_api import async_playwright
 # ============================================================
 
 BOOKING_URL = os.getenv("BOOKING_URL", "https://darbottarolo.fidy.app/prenew.php?referer=AI")
+# main.py
+from main_darbottarolo import app
 
 PW_TIMEOUT_MS = int(os.getenv("PW_TIMEOUT_MS", "60000"))
 PW_NAV_TIMEOUT_MS = int(os.getenv("PW_NAV_TIMEOUT_MS", "60000"))
