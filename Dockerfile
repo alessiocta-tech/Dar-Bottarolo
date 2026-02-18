@@ -1,13 +1,18 @@
-# Usiamo l'immagine ufficiale Microsoft con Python e i Browser già pronti
-FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
+<?php
+header('Content-Type: application/json; charset=utf-8');
 
-WORKDIR /app
+$host = "localhost";
+$db   = "dbiid6aizvpaqr";
+$user = "uycfo1ohpkein";
+$pass = "PASSWORD_NUOVA";
 
-# Copiamo i tuoi file nel server
-COPY . /app
+$conn = new mysqli($host, $user, $pass, $db);
 
-# Installiamo le librerie Python
-RUN pip install --no-cache-dir -r requirements.txt
+if ($conn->connect_error) {
+  http_response_code(500);
+  echo json_encode(["ok"=>false,"error"=>$conn->connect_error]);
+  exit;
+}
 
-# Comando di avvio
-CMD ["python", "main.py"]
+echo json_encode(["ok"=>true,"db"=>"connected"]);
+$conn->close();
