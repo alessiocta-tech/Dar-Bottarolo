@@ -1,18 +1,13 @@
-<?php
-header('Content-Type: application/json; charset=utf-8');
+FROM mcr.microsoft.com/playwright/python:v1.41.0-jammy
 
-$host = "localhost";
-$db   = "dbiid6aizvpaqr";
-$user = "uycfo1ohpkein";
-$pass = "PASSWORD_NUOVA";
+WORKDIR /app
 
-$conn = new mysqli($host, $user, $pass, $db);
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-if ($conn->connect_error) {
-  http_response_code(500);
-  echo json_encode(["ok"=>false,"error"=>$conn->connect_error]);
-  exit;
-}
+COPY . .
 
-echo json_encode(["ok"=>true,"db"=>"connected"]);
-$conn->close();
+ENV PORT=8080
+ENV PYTHONUNBUFFERED=1
+
+CMD ["bash","-lc","uvicorn main_darbottarolo:app --host 0.0.0.0 --port ${PORT} --workers 1"]
