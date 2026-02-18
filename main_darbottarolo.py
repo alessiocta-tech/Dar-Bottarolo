@@ -9,10 +9,6 @@ from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from playwright.async_api import async_playwright
 
-# ============================================================
-# CONFIG
-# ============================================================
-
 BOOKING_URL = os.getenv("BOOKING_URL", "https://darbottarolo.fidy.app/prenew.php?referer=AI")
 
 PW_TIMEOUT_MS = int(os.getenv("PW_TIMEOUT_MS", "60000"))
@@ -41,9 +37,10 @@ SEDE_UNICA = "Dar Bottarolo"
 
 app = FastAPI()
 
-# ============================================================
+
+# =======================
 # DB
-# ============================================================
+# =======================
 
 def _db() -> sqlite3.Connection:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -147,9 +144,10 @@ def _get_customer(phone: str) -> Optional[Dict[str, Any]]:
     conn.close()
     return dict(row) if row else None
 
-# ============================================================
-# NORMALIZZAZIONI
-# ============================================================
+
+# =======================
+# HELPERS
+# =======================
 
 def _norm_orario(s: str) -> str:
     s = (s or "").strip().lower().replace("ore", "").replace("alle", "").strip()
@@ -191,7 +189,6 @@ def _pick_closest_time(target_hhmm: str, options: List[Tuple[str, str]]) -> Opti
     target_m = _time_to_minutes(target_hhmm)
     if target_m is None:
         return options[0][0] if options else None
-
     best = None
     best_delta = None
     for v, _ in options:
@@ -203,7 +200,6 @@ def _pick_closest_time(target_hhmm: str, options: List[Tuple[str, str]]) -> Opti
         if best_delta is None or delta < best_delta:
             best_delta = delta
             best = v
-
     if best is not None and best_delta is not None and best_delta <= RETRY_TIME_WINDOW_MIN:
         return best
     return None
@@ -213,20 +209,18 @@ def _looks_like_full_slot(msg: str) -> bool:
     patterns = ["pieno", "sold out", "non disponibile", "esaur", "completo", "nessuna disponibil", "turno completo"]
     return any(p in s for p in patterns)
 
-# ============================================================
-# MODEL
-# ============================================================
+
+# =======================
+# Pydantic v2 model
+# =======================
 
 class RichiestaPrenotazione(BaseModel):
     fase: str = Field("book", description='Fase: "availability" oppure "book"')
-
     nome: Optional[str] = ""
     cognome: Optional[str] = ""
     email: Optional[str] = ""
     telefono: Optional[str] = ""
-
-    sede: Optional[str] = ""  # compatibilità, ma ignorata
-
+    sede: Optional[str] = ""  # compatibilità: ignorata
     data: str
     orario: str
     persone: Union[int, str] = Field(...)
@@ -276,18 +270,19 @@ class RichiestaPrenotazione(BaseModel):
         values["cognome"] = (values.get("cognome") or "").strip()
         return values
 
-# ============================================================
-# PLAYWRIGHT HELPERS
-# ============================================================
+
+# =======================
+# Playwright helpers
+# =======================
 
 async def _block_heavy(route):
-    if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+    if route.request.resource_type in ("image", "media", "font", "stylesheet"):
         await route.abort()
     else:
         await route.continue_()
 
 async def _maybe_click_cookie(page):
-    for patt in [r"accetta", r"consent", r"ok", r"accetto"]:
+    for patt in (r"accetta", r"consent", r"ok", r"accetto"):
         try:
             loc = page.locator(f"text=/{patt}/i").first
             if await loc.count() > 0:
@@ -332,16 +327,88 @@ async def _set_seggiolini(page, seggiolini: int):
 
 async def _set_date(page, data_iso: str):
     tipo = _get_data_type(data_iso)
+
     if tipo in ("Oggi", "Domani"):
         btn = page.locator(f'.dataBtn[rel="{data_iso}"]').first
         if await btn.count() > 0:
             await btn.click(timeout=6000, force=True)
             return
 
-    await page.evaluate(
-        """(val) => {
-          const el = document.querySelector('#DataPren') || document.querySelector('input[type="date"]');
-          if (!el) return false;
-          el.value = val;
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-          return t
+    js = (
+        "val => {"
+        "  const el = document.querySelector('#DataPren') || document.querySelector('input[type=\"date\"]');"
+        "  if (!el) return false;"
+        "  el.value = val;"
+        "  el.dispatchEvent(new Event('change', { bubbles: true }));"
+        "  return true;"
+        "}"
+    )
+    await page.evaluate(js, data_iso)
+
+async def _click_pasto(page, pasto: str):
+    loc = page.locator(f'.tipoBtn[rel="{pasto}"]').first
+    if await loc.count() > 0:
+        await loc.click(timeout=8000, force=True)
+        return
+    await page.locator(f"text=/{pasto}/i").first.click(timeout=8000, force=True)
+
+async def _get_orario_options(page) -> List[Tuple[str, str]]:
+    await page.wait_for_selector("#OraPren", state="visible", timeout=PW_TIMEOUT_MS)
+    try:
+        await page.click("#OraPren", timeout=3000)
+    except Exception:
+        pass
+
+    try:
+        await page.wait_for_selector("#OraPren option", timeout=PW_TIMEOUT_MS)
+    except Exception:
+        return []
+
+    js = (
+        "() => {"
+        "  const sel = document.querySelector('#OraPren');"
+        "  if (!sel) return [];"
+        "  return Array.from(sel.options)"
+        "    .filter(o => !o.disabled)"
+        "    .map(o => ({value: (o.value||'').trim(), text: (o.textContent||'').trim()}));"
+        "}"
+    )
+    opts = await page.evaluate(js)
+
+    out: List[Tuple[str, str]] = []
+    for o in opts:
+        v = (o.get("value") or "").strip()
+        t = (o.get("text") or "").strip()
+        if not t:
+            continue
+        if re.match(r"^\d{1,2}:\d{2}", t):
+            out.append(((v or t).strip(), t))
+    return out
+
+async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
+    await page.wait_for_selector("#OraPren", state="visible", timeout=PW_TIMEOUT_MS)
+    await page.wait_for_function(
+        "(() => { const sel=document.querySelector('#OraPren'); return sel && sel.options && sel.options.length > 1; })()",
+        timeout=PW_TIMEOUT_MS,
+    )
+
+    wanted = wanted_hhmm.strip()
+    wanted_val = wanted + ":00" if re.fullmatch(r"\d{2}:\d{2}", wanted) else wanted
+
+    # 1) exact by value
+    try:
+        res = await page.locator("#OraPren").select_option(value=wanted_val)
+        if res:
+            return wanted_val, False
+    except Exception:
+        pass
+
+    # 2) contains by text
+    js = (
+        "hhmm => {"
+        "  const sel = document.querySelector('#OraPren');"
+        "  if (!sel) return false;"
+        "  const opt = Array.from(sel.options).find(o => (o.textContent || '').includes(hhmm));"
+        "  if (!opt) return false;"
+        "  sel.value = opt.value;"
+        "  sel.dispatchEvent(new Event('change', { bubbles: tr
