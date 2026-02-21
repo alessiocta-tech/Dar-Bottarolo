@@ -1,7 +1,9 @@
-# main.py (ROBUSTO) — wrapper + app FastAPI completo
-# - Evita tutti i problemi di stringhe JS non chiuse
-# - Funziona sia con uvicorn main:app che con uvicorn main_darbottarolo:app
-# - Se vuoi, puoi anche eliminare main_darbottarolo.py e usare solo questo file
+# main.py — Dar Bottarolo Centralino AI (ROBUSTO)
+# - UNA sola app FastAPI
+# - Endpoint tool: POST /book_table
+# - Health: GET /
+# - (Opzionale) debug: POST /webhook (log payload grezzo)
+# - Fix availability: attende che #OraPren sia popolata (options.length > 1)
 
 import os
 import re
@@ -13,7 +15,6 @@ from typing import Optional, Union, List, Dict, Any, Tuple
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from playwright.async_api import async_playwright
-
 
 # ============================================================
 # CONFIG
@@ -43,59 +44,14 @@ IPHONE_UA = (
 )
 
 DEFAULT_EMAIL = os.getenv("DEFAULT_EMAIL", "default@prenotazioni.com")
-
 SEDE_UNICA = "Dar Bottarolo"
-from fastapi import FastAPI, Request
-
-app = FastAPI()
-
-@app.post("/")
-async def root_post(request: Request):
-    data = await request.json()
-    print("Ricevuto:", data)
-    return {"status": "ok"}
 
 # ============================================================
-# APP
+# APP (UNA SOLA ISTANZA)
 # ============================================================
 
-app = FastAPI()
+app = FastAPI(title="Centralino AI - Dar Bottarolo")
 
-
-from fastapi import FastAPI, Request, HTTPException
-
-app = FastAPI()
-
-@app.get("/")
-def home():
-    return {
-        "status": "Centralino AI - Dar Bottarolo (Railway)",
-        "booking_url": BOOKING_URL,
-        "disable_final_submit": DISABLE_FINAL_SUBMIT,
-        "db": DB_PATH,
-    }
-
-# endpoint di test (utile per vedere cosa manda ElevenLabs)
-@app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
-
-    print("ELEVENLABS_WEBHOOK:", json.dumps(payload, ensure_ascii=False)[:2000])
-    return {"ok": True}
-
-# opzionale: se ElevenLabs insiste a fare POST su "/"
-@app.post("/")
-async def root_post(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
-
-    print("ELEVENLABS_ROOT_POST:", json.dumps(payload, ensure_ascii=False)[:2000])
-    return {"ok": True}
 
 # ============================================================
 # DB
@@ -106,6 +62,7 @@ def _db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def _db_init() -> None:
     conn = _db()
@@ -146,7 +103,9 @@ def _db_init() -> None:
     conn.commit()
     conn.close()
 
+
 _db_init()
+
 
 def _log_booking(payload: Dict[str, Any], ok: bool, message: str) -> None:
     conn = _db()
@@ -174,7 +133,16 @@ def _log_booking(payload: Dict[str, Any], ok: bool, message: str) -> None:
     conn.commit()
     conn.close()
 
-def _upsert_customer(phone: str, name: str, email: str, sede: str, persone: int, seggiolini: int, note: str) -> None:
+
+def _upsert_customer(
+    phone: str,
+    name: str,
+    email: str,
+    sede: str,
+    persone: int,
+    seggiolini: int,
+    note: str
+) -> None:
     conn = _db()
     cur = conn.cursor()
     cur.execute(
@@ -194,6 +162,7 @@ def _upsert_customer(phone: str, name: str, email: str, sede: str, persone: int,
     )
     conn.commit()
     conn.close()
+
 
 def _get_customer(phone: str) -> Optional[Dict[str, Any]]:
     conn = _db()
@@ -218,12 +187,14 @@ def _norm_orario(s: str) -> str:
         return f"{int(hh):02d}:{int(mm):02d}"
     return s
 
+
 def _calcola_pasto(orario_hhmm: str) -> str:
     try:
         hh = int(orario_hhmm.split(":")[0])
         return "PRANZO" if hh < 17 else "CENA"
     except Exception:
         return "CENA"
+
 
 def _get_data_type(data_str: str) -> str:
     try:
@@ -238,11 +209,13 @@ def _get_data_type(data_str: str) -> str:
     except Exception:
         return "Altra"
 
+
 def _time_to_minutes(hhmm: str) -> Optional[int]:
     m = re.fullmatch(r"(\d{2}):(\d{2})", hhmm or "")
     if not m:
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
+
 
 def _pick_closest_time(target_hhmm: str, options: List[Tuple[str, str]]) -> Optional[str]:
     target_m = _time_to_minutes(target_hhmm)
@@ -265,6 +238,7 @@ def _pick_closest_time(target_hhmm: str, options: List[Tuple[str, str]]) -> Opti
         return best
     return None
 
+
 def _looks_like_full_slot(msg: str) -> bool:
     s = (msg or "").lower()
     patterns = ["pieno", "sold out", "non disponibile", "esaur", "completo", "nessuna disponibil", "turno completo"]
@@ -272,7 +246,7 @@ def _looks_like_full_slot(msg: str) -> bool:
 
 
 # ============================================================
-# MODEL (Pydantic v2)
+# MODEL
 # ============================================================
 
 class RichiestaPrenotazione(BaseModel):
@@ -296,23 +270,19 @@ class RichiestaPrenotazione(BaseModel):
         if not isinstance(values, dict):
             return values
 
-        # note/nota
         if values.get("note") not in (None, ""):
             values["nota"] = values.get("note")
 
-        # fase
         if not values.get("fase"):
             values["fase"] = "book"
         values["fase"] = str(values["fase"]).strip().lower()
 
-        # persone
         p = values.get("persone")
         if isinstance(p, str):
             p2 = re.sub(r"[^\d]", "", p)
             if p2:
                 values["persone"] = int(p2)
 
-        # seggiolini
         s = values.get("seggiolini")
         if isinstance(s, str):
             s2 = re.sub(r"[^\d]", "", s)
@@ -322,26 +292,22 @@ class RichiestaPrenotazione(BaseModel):
         except Exception:
             values["seggiolini"] = 0
 
-        # orario
         if values.get("orario") is not None:
             values["orario"] = _norm_orario(str(values["orario"]))
 
-        # telefono
         if values.get("telefono") is not None:
             values["telefono"] = re.sub(r"[^\d]", "", str(values["telefono"]))
 
-        # email
         if not values.get("email"):
             values["email"] = DEFAULT_EMAIL
 
         values["nome"] = (values.get("nome") or "").strip()
         values["cognome"] = (values.get("cognome") or "").strip()
-
         return values
 
 
 # ============================================================
-# PLAYWRIGHT HELPERS (NO STRINGHE TRONCATE)
+# PLAYWRIGHT HELPERS
 # ============================================================
 
 async def _block_heavy(route):
@@ -349,6 +315,7 @@ async def _block_heavy(route):
         await route.abort()
     else:
         await route.continue_()
+
 
 async def _maybe_click_cookie(page):
     for patt in (r"accetta", r"consent", r"ok", r"accetto"):
@@ -360,14 +327,17 @@ async def _maybe_click_cookie(page):
         except Exception:
             pass
 
+
 async def _wait_ready(page):
     await page.wait_for_selector(".nCoperti", state="visible", timeout=PW_TIMEOUT_MS)
+
 
 async def _click_persone(page, n: int):
     loc = page.locator(f'.nCoperti[rel="{n}"]').first
     if await loc.count() == 0:
         loc = page.get_by_text(str(n), exact=True).first
     await loc.click(timeout=8000, force=True)
+
 
 async def _set_seggiolini(page, seggiolini: int):
     seggiolini = max(0, min(5, int(seggiolini or 0)))
@@ -394,6 +364,7 @@ async def _set_seggiolini(page, seggiolini: int):
         loc = page.get_by_text(str(seggiolini), exact=True).first
     await loc.click(timeout=6000, force=True)
 
+
 async def _set_date(page, data_iso: str):
     tipo = _get_data_type(data_iso)
 
@@ -414,6 +385,7 @@ async def _set_date(page, data_iso: str):
     )
     await page.evaluate(js, data_iso)
 
+
 async def _click_pasto(page, pasto: str):
     loc = page.locator(f'.tipoBtn[rel="{pasto}"]').first
     if await loc.count() > 0:
@@ -421,13 +393,14 @@ async def _click_pasto(page, pasto: str):
         return
     await page.locator(f"text=/{pasto}/i").first.click(timeout=8000, force=True)
 
-async def _get_orario_options(page) -> List[Tuple[str, str]]:
-    await page.wait_for_selector("#OraPren", state="visible", timeout=PW_TIMEOUT_MS)
 
-    try:
-        await page.wait_for_selector("#OraPren option", timeout=PW_TIMEOUT_MS)
-    except Exception:
-        return []
+async def _get_orario_options(page) -> List[Tuple[str, str]]:
+    # FIX: aspetta che la select venga popolata (non solo che esista)
+    await page.wait_for_selector("#OraPren", state="visible", timeout=PW_TIMEOUT_MS)
+    await page.wait_for_function(
+        "(() => { const sel=document.querySelector('#OraPren'); return !!(sel && sel.options && sel.options.length > 1); })()",
+        timeout=PW_TIMEOUT_MS,
+    )
 
     js = (
         "() => {"
@@ -446,13 +419,13 @@ async def _get_orario_options(page) -> List[Tuple[str, str]]:
         t = (o.get("text") or "").strip()
         if not t:
             continue
-        if re.match(r"^\d{1,2}:\d{2}", t):
+        if re.match(r"^\d{1,2}:\d{2}", t):  # accetta 9:00 e 09:00
             out.append(((v or t).strip(), t))
     return out
 
+
 async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
     await page.wait_for_selector("#OraPren", state="visible", timeout=PW_TIMEOUT_MS)
-
     await page.wait_for_function(
         "(() => { const sel=document.querySelector('#OraPren'); return !!(sel && sel.options && sel.options.length > 1); })()",
         timeout=PW_TIMEOUT_MS,
@@ -461,7 +434,6 @@ async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
     wanted = wanted_hhmm.strip()
     wanted_val = wanted + ":00" if re.fullmatch(r"\d{2}:\d{2}", wanted) else wanted
 
-    # 1) exact by value
     try:
         res = await page.locator("#OraPren").select_option(value=wanted_val)
         if res:
@@ -469,7 +441,6 @@ async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
     except Exception:
         pass
 
-    # 2) exact by text contains hh:mm
     js = (
         "hhmm => {"
         " const sel = document.querySelector('#OraPren');"
@@ -486,7 +457,6 @@ async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
         val = await page.locator("#OraPren").input_value()
         return val, False
 
-    # 3) nearest
     options = await _get_orario_options(page)
     best = _pick_closest_time(wanted, options)
     if best:
@@ -494,6 +464,7 @@ async def _select_orario_or_retry(page, wanted_hhmm: str) -> Tuple[str, bool]:
         return best, True
 
     raise RuntimeError(f"Orario non disponibile: {wanted}")
+
 
 async def _fill_note_step5(page, note: str):
     note = (note or "").strip()
@@ -505,12 +476,14 @@ async def _fill_note_step5(page, note: str):
     except Exception:
         pass
 
+
 async def _click_conferma(page):
     loc = page.locator(".confDati").first
     if await loc.count() > 0:
         await loc.click(timeout=8000, force=True)
         return
     await page.locator("text=/CONFERMA/i").first.click(timeout=8000, force=True)
+
 
 async def _fill_form(page, nome: str, cognome: str, email: str, telefono: str):
     nome = (nome or "").strip() or "Cliente"
@@ -523,6 +496,7 @@ async def _fill_form(page, nome: str, cognome: str, email: str, telefono: str):
     await page.locator("#Cognome").fill(cognome, timeout=8000)
     await page.locator("#Email").fill(email, timeout=8000)
     await page.locator("#Telefono").fill(telefono, timeout=8000)
+
 
 async def _click_prenota(page):
     loc = page.locator('input[type="submit"][value="PRENOTA"]').first
@@ -545,12 +519,25 @@ def home():
         "db": DB_PATH,
     }
 
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    # utile solo per debug: vedere payload grezzo
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
+    print("ELEVENLABS_WEBHOOK:", json.dumps(payload, ensure_ascii=False)[:2000])
+    return {"ok": True}
+
+
 def _require_admin(request: Request):
     if not ADMIN_TOKEN:
         return
     token = request.headers.get("x-admin-token") or request.query_params.get("token")
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 @app.get("/_admin/dashboard")
 def admin_dashboard(request: Request):
@@ -570,7 +557,12 @@ def admin_dashboard(request: Request):
     cust = [dict(r) for r in cur.fetchall()]
     conn.close()
 
-    return {"stats": {"total": total, "ok": ok_sum, "ok_rate_pct": round(ok_rate, 2)}, "last_bookings": last, "customers": cust}
+    return {
+        "stats": {"total": total, "ok": ok_sum, "ok_rate_pct": round(ok_rate, 2)},
+        "last_bookings": last,
+        "customers": cust,
+    }
+
 
 @app.post("/book_table")
 async def book_table(dati: RichiestaPrenotazione, request: Request):
@@ -640,7 +632,13 @@ async def book_table(dati: RichiestaPrenotazione, request: Request):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process", "--disable-gpu"],
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--single-process",
+                "--disable-gpu",
+            ],
         )
         context = await browser.new_context(user_agent=IPHONE_UA, viewport={"width": 390, "height": 844})
         page = await context.new_page()
@@ -680,9 +678,12 @@ async def book_table(dati: RichiestaPrenotazione, request: Request):
                 options = await _get_orario_options(page)
                 orari: List[str] = []
                 for (v, t) in options:
-                    mt = re.search(r"(\d{2}:\d{2})", t or "")
+                    mt = re.search(r"(\d{1,2}:\d{2})", t or "")
                     hhmm = mt.group(1) if mt else (v or "")[:5]
-                    if hhmm and re.fullmatch(r"\d{2}:\d{2}", hhmm):
+                    # normalizza 9:00 -> 09:00
+                    if hhmm and re.fullmatch(r"\d{1,2}:\d{2}", hhmm):
+                        hh, mm = hhmm.split(":")
+                        hhmm = f"{int(hh):02d}:{int(mm):02d}"
                         orari.append(hhmm)
                 orari = sorted(list(dict.fromkeys(orari)))
                 return {
@@ -747,9 +748,10 @@ async def book_table(dati: RichiestaPrenotazione, request: Request):
                     options = [(v, t) for (v, t) in options if v != selected_orario_value]
                     best = _pick_closest_time(orario_req, options)
                     if not best:
-                        raise RuntimeError(f"Slot pieno e nessun orario alternativo entro {RETRY_TIME_WINDOW_MIN} min. Msg: {ajax_txt}")
+                        raise RuntimeError(
+                            f"Slot pieno e nessun orario alternativo entro {RETRY_TIME_WINDOW_MIN} min. Msg: {ajax_txt}"
+                        )
 
-                    # riparti flusso con nuovo orario
                     await page.goto(BOOKING_URL, wait_until="domcontentloaded")
                     await _maybe_click_cookie(page)
                     await _wait_ready(page)
@@ -782,9 +784,22 @@ async def book_table(dati: RichiestaPrenotazione, request: Request):
                     note=note_in,
                 )
 
-            msg = f"Prenotazione OK: {pax_req} pax - {SEDE_UNICA} {data_req} {selected_orario_value[:5]} - {(dati.nome or '').strip()} {cognome}".strip()
+            msg = (
+                f"Prenotazione OK: {pax_req} pax - {SEDE_UNICA} "
+                f"{data_req} {selected_orario_value[:5]} - {(dati.nome or '').strip()} {cognome}"
+            ).strip()
+
             payload_log = dati.model_dump()
-            payload_log.update({"email": email, "note": note_in, "seggiolini": seggiolini, "orario": selected_orario_value[:5], "cognome": cognome, "sede": SEDE_UNICA})
+            payload_log.update(
+                {
+                    "email": email,
+                    "note": note_in,
+                    "seggiolini": seggiolini,
+                    "orario": selected_orario_value[:5],
+                    "cognome": cognome,
+                    "sede": SEDE_UNICA,
+                }
+            )
             _log_booking(payload_log, True, msg)
 
             return {"ok": True, "message": msg, "fallback_time": used_fallback, "selected_time": selected_orario_value[:5]}
@@ -801,6 +816,8 @@ async def book_table(dati: RichiestaPrenotazione, request: Request):
             payload_log.update({"note": note_in, "seggiolini": seggiolini, "sede": SEDE_UNICA})
             _log_booking(payload_log, False, str(e))
 
-            return {"ok": False, "message": "Sto verificando la prenotazione, un attimo.", "error": str(e), "screenshot": screenshot_path}
+            # messaggio “neutro” per voce: niente dettagli tecnici al cliente
+            return {"ok": False, "message": "Non riesco a confermare in questo momento. Vuoi provare un altro orario?", "error": str(e), "screenshot": screenshot_path}
+
         finally:
             await browser.close()
