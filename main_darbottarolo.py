@@ -43,8 +43,17 @@ IPHONE_UA = (
 )
 
 DEFAULT_EMAIL = os.getenv("DEFAULT_EMAIL", "default@prenotazioni.com")
-SEDE_UNICA = "Dar Bottarolo"
 
+SEDE_UNICA = "Dar Bottarolo"
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/")
+async def root_post(request: Request):
+    data = await request.json()
+    print("Ricevuto:", data)
+    return {"status": "ok"}
 
 # ============================================================
 # APP
