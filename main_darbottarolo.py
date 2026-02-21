@@ -62,6 +62,41 @@ async def root_post(request: Request):
 app = FastAPI()
 
 
+from fastapi import FastAPI, Request, HTTPException
+
+app = FastAPI()
+
+@app.get("/")
+def home():
+    return {
+        "status": "Centralino AI - Dar Bottarolo (Railway)",
+        "booking_url": BOOKING_URL,
+        "disable_final_submit": DISABLE_FINAL_SUBMIT,
+        "db": DB_PATH,
+    }
+
+# endpoint di test (utile per vedere cosa manda ElevenLabs)
+@app.post("/webhook")
+async def webhook(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
+
+    print("ELEVENLABS_WEBHOOK:", json.dumps(payload, ensure_ascii=False)[:2000])
+    return {"ok": True}
+
+# opzionale: se ElevenLabs insiste a fare POST su "/"
+@app.post("/")
+async def root_post(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {"raw": (await request.body()).decode("utf-8", errors="ignore")}
+
+    print("ELEVENLABS_ROOT_POST:", json.dumps(payload, ensure_ascii=False)[:2000])
+    return {"ok": True}
+
 # ============================================================
 # DB
 # ============================================================
